@@ -1,5 +1,5 @@
 # Intro:
-This package provide a simple Franka arm and Robotiq Gripper simulator written in Mujoco.
+This package provide a simple Franka arm and Franka hand gripper simulator written in Mujoco.
 It includes a state-based and a vision-based Franka gear assembly task with xbox controller environment.
 ![default](https://github.com/user-attachments/assets/287d8f8d-0643-45ee-a3f4-d85638544abe)
 
@@ -13,9 +13,24 @@ It includes a state-based and a vision-based Franka gear assembly task with xbox
 
 # Explore the Environments
 - Run `python franka_sim/test/test_gym_env_human.py` to launch a display window and visualize the task.
-- Run `python franka_sim/test/python xbox_teleoperation.py --gui` to use xbox controller control robot finishing gear assembly in mujoco
+- Run `python franka_sim/test/teleoperation.py --mode task --task gear --input xbox` to use an Xbox controller on the gear task.
+- Run `python franka_sim/test/teleoperation.py --mode task --task gear --input keyboard` to use keyboard teleoperation on the gear task.
+- Run `python franka_sim/test/teleoperation.py --mode controller --input keyboard --print-joints` to teleoperate a Franka-only scene and print the solved 7D arm joint command.
 - Run `python franka_sim/test/xbox_game_controller.py` to test your xbox controller hardware
-- 
+
+Keyboard controls:
+- Keep the `FR3 Keyboard Teleoperation` pygame window focused so MuJoCo viewer shortcuts do not receive the teleop keys.
+- `W/S` or `Up/Down`: move +Y/-Y
+- `D/A` or `Right/Left`: move +X/-X
+- `E/Q`: move +Z/-Z
+- `L/J`: roll +/-
+- `I/K`: pitch +/-
+- `O/U`: yaw +/-
+- `Z/X` or `[/]`: open/close gripper
+- `C`: stop gripper
+- `Space`: reset environment
+- `Esc`: exit
+
 # Credits:
 - This simulation is initially built by [Kevin Zakka](https://kzakka.com/).
 

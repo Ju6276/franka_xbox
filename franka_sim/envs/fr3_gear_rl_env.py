@@ -24,6 +24,8 @@ _XML_PATH = _HERE / "xmls" / "arena.xml"
 _PANDA_HOME = np.asarray((0, -0.405, 0, -2.86, 0, 2.43, np.pi / 4))
 _CARTESIAN_BOUNDS = np.asarray([[0.2, -0.3, 0], [0.6, 0.3, 0.5]])
 _SAMPLING_BOUNDS = np.asarray([[0.25, -0.25], [0.55, 0.25]])
+_TCP_POS_SENSOR = "panda/pinch_pos"
+_TCP_VEL_SENSOR = "panda/pinch_vel"
 
 
 class PandaAssembleGearGymEnv(MujocoGymEnv):
@@ -77,6 +79,12 @@ class PandaAssembleGearGymEnv(MujocoGymEnv):
             [self._model.actuator(f"actuator{i}").id for i in range(1, 8)]
         )
         self._gripper_ctrl_id = self._model.actuator("fingers_actuator").id
+        self._finger_joint_ids = np.asarray(
+            [self._model.joint(f"finger_joint{i}").id for i in range(1, 3)]
+        )
+        self._finger_qpos_ids = self._model.jnt_qposadr[self._finger_joint_ids]
+        self._finger_qvel_ids = self._model.jnt_dofadr[self._finger_joint_ids]
+        self._finger_joint_ranges = self._model.jnt_range[self._finger_joint_ids]
         self._pinch_site_id = self._model.site("pinch").id
         self._block_z = self._model.geom("block").size[2]
 
@@ -164,10 +172,11 @@ class PandaAssembleGearGymEnv(MujocoGymEnv):
 
         # Reset arm to home position.
         self._data.qpos[self._panda_dof_ids] = _PANDA_HOME
+        self._reset_gripper(open_gripper=True)
         mujoco.mj_forward(self._model, self._data)
 
         # Reset mocap body to home position.
-        tcp_pos = self._data.sensor("2f85/pinch_pos").data
+        tcp_pos = self._data.sensor(_TCP_POS_SENSOR).data
         print(tcp_pos)
         self._data.mocap_pos[0] = tcp_pos
         # self._data.mocap_pos[0] = [3.07796025e-01, -4.01873589e-20,  4.44215357e-01]
@@ -209,11 +218,17 @@ class PandaAssembleGearGymEnv(MujocoGymEnv):
         npos = np.clip(pos + dpos, *_CARTESIAN_BOUNDS)
         self._data.mocap_pos[0] = npos
 
-        # Set the gripper grasp
-        g = self._data.ctrl[self._gripper_ctrl_id] / 255
-        dg = grasp * self._action_scale[1]
-        ng = np.clip(g + dg, 0.0, 1.0)
-        self._data.ctrl[self._gripper_ctrl_id] = ng * 255
+        # Keyboard teleop uses +/-1 for direct open/close. Smaller values keep
+        # the old incremental behavior used by gamepad inputs.
+        if grasp <= -1.0:
+            self._open_gripper()
+        elif grasp >= 1.0:
+            self._set_gripper_command(open_gripper=False)
+        else:
+            g = self._data.ctrl[self._gripper_ctrl_id] / 255
+            dg = grasp * self._action_scale[1]
+            ng = np.clip(g + dg, 0.0, 1.0)
+            self._data.ctrl[self._gripper_ctrl_id] = ng * 255
 
         # Update the mocap orientation
         current_quat = self._data.mocap_quat[0].copy()
@@ -255,15 +270,28 @@ class PandaAssembleGearGymEnv(MujocoGymEnv):
 
     # Helper methods.
 
+    def _set_gripper_command(self, open_gripper: bool):
+        self._data.ctrl[self._gripper_ctrl_id] = 0.0 if open_gripper else 255.0
+
+    def _open_gripper(self):
+        self._reset_gripper(open_gripper=True)
+
+    def _reset_gripper(self, open_gripper: bool):
+        target_qpos = self._finger_joint_ranges[:, 1] if open_gripper else self._finger_joint_ranges[:, 0]
+        self._data.qpos[self._finger_qpos_ids] = target_qpos
+        self._data.qvel[self._finger_qvel_ids] = 0.0
+        self._set_gripper_command(open_gripper=open_gripper)
+        mujoco.mj_forward(self._model, self._data)
+
     def _compute_observation(self) -> dict:
         obs = {}
         obs["state"] = {}
 
-        tcp_pos = self._data.sensor("2f85/pinch_pos").data
+        tcp_pos = self._data.sensor(_TCP_POS_SENSOR).data
         # print("tcp_pos", tcp_pos)
         obs["state"]["panda/tcp_pos"] = tcp_pos.astype(np.float32)
 
-        tcp_vel = self._data.sensor("2f85/pinch_vel").data
+        tcp_vel = self._data.sensor(_TCP_VEL_SENSOR).data
         obs["state"]["panda/tcp_vel"] = tcp_vel.astype(np.float32)
 
         gripper_pos = np.array(
@@ -303,7 +331,7 @@ class PandaAssembleGearGymEnv(MujocoGymEnv):
 
     def _compute_reward(self) -> float:
         block_pos = self._data.sensor("block_pos").data
-        tcp_pos = self._data.sensor("2f85/pinch_pos").data
+        tcp_pos = self._data.sensor(_TCP_POS_SENSOR).data
         dist = np.linalg.norm(block_pos - tcp_pos)
         r_close = np.exp(-20 * dist)
         r_lift = (block_pos[2] - self._z_init) / (self._z_success - self._z_init)

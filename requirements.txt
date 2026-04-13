@@ -5,3 +5,4 @@ gymnasium < 1.0.0
 dm-robotics-transformations
 imageio[ffmpeg]
 lxml
+pygame>=2.5.1

@@ -62,6 +62,7 @@ class XboxInput:
         # 初始化 Pygame 和 Joystick
         pygame.init()
         pygame.joystick.init()
+        self._exit_requested = False
 
         # 检查是否有手柄连接
         if pygame.joystick.get_count() == 0:
@@ -70,6 +71,23 @@ class XboxInput:
             self.joystick = pygame.joystick.Joystick(0)
             self.joystick.init()
             print(f"已连接手柄: {self.joystick.get_name()}")
+
+    def poll_events(self):
+        """处理手柄事件。"""
+        for event in pygame.event.get():
+            if event.type == pygame.JOYBUTTONDOWN and event.button == 11:  # 停止按钮
+                self._exit_requested = True
+                print("退出")
+
+    def should_exit(self) -> bool:
+        """返回是否请求退出 teleoperation。"""
+        return self._exit_requested
+
+    def close(self):
+        """释放 pygame 资源。"""
+        if hasattr(self, "joystick"):
+            self.joystick.quit()
+        pygame.quit()
 
     def apply_dead_zone(self, value: float, threshold: float = 0.2) -> float:
         """
