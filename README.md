@@ -18,6 +18,12 @@ It includes a state-based and a vision-based Franka gear assembly task with xbox
 - Run `python franka_sim/test/teleoperation.py --mode controller --input keyboard --print-joints` to teleoperate a Franka-only scene and print the solved 7D arm joint command.
 - Run `python franka_sim/test/xbox_game_controller.py` to test your xbox controller hardware
 
+## Main Workflow Commands
+- Run `Python franka_sim/test/teleoperation.py --mode controller --input xbox --record --save-images --show-camera-view` to record teleoperation data.
+- Run `python franka_sim/test/convert_to_lerobot.py --raw-dir dataset_raw --out-dir demo_data_converted --task-name franka_teleop --robot-type franka --fps 50` to convert raw recordings to LeRobot-style dataset
+- Run `python franka_sim/test/replay_dataset.py --parquet demo_data_converted/data/chunk-000/episode_000000.parquet --fps 50` to replay a record episode.
+
+
 Keyboard controls:
 - Keep the `FR3 Keyboard Teleoperation` pygame window focused so MuJoCo viewer shortcuts do not receive the teleop keys.
 - `W/S` or `Up/Down`: move +Y/-Y

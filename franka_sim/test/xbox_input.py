@@ -4,148 +4,161 @@ import numpy as np
 
 class XboxInput:
     """
-        XboxInput Class
-        
-        This class captures inputs from an Xbox controller and maps them to robotic control actions 
-        suitable for the Franka Research 3 Robot simulation in MuJoCo. The inputs are processed to 
-        ensure precision and include dead zones to filter out minor noise.
-        
-        Author: parzivar
-        Date: 2024-11-30
-        Version: 1.0
-        
-        Input Mapping:
-        --------------
-        1. Left Joystick:
-           - Axis 0: Controls translation along the X-axis (scaled by 0.01, with a dead zone).
-           - Axis 1: Controls translation along the Y-axis (scaled by 0.01, with a dead zone).
-        
-        2. Buttons for Z-axis Movement:
-           - Y Button (Button 4): Moves the end-effector up along the Z-axis (fixed increment).
-           - A Button (Button 0): Moves the end-effector down along the Z-axis (fixed increment).
-        
-        3. Right Joystick:
-           - Axis 3: Controls pitch angle adjustment (scaled by 0.1, with a dead zone).
-           - Axis 2: Controls roll angle adjustment (scaled by 0.1, with a dead zone).
-        
-        4. Trigger Inputs for Yaw Adjustment:
-           - Left Trigger (Axis 4): Adjusts yaw angle to the left (input mapped from [-1, 1] to [0, 1]).
-           - Right Trigger (Axis 5): Adjusts yaw angle to the right (input mapped from [-1, 1] to [0, 1]).
-           - The combined input from the triggers is used for smooth yaw control.
-        
-        5. Gripper Controls:
-           - X Button (Button 3): Opens the gripper (decreases gripper state by 0.1 per press).
-           - B Button (Button 1): Closes the gripper (increases gripper state by 0.1 per press).
-        
-        Special Features:
-        -----------------
-        1. Dead Zone Detection:
-           - Dead zones are applied to joystick inputs to avoid small unintentional movements.
-           - Inputs below the dead zone threshold are treated as zero.
-        
-        2. Scaling:
-           - Translational movements (X, Y, Z) are scaled for precision control.
-           - Rotational movements (pitch, roll, yaw) are scaled independently.
-           - Gripper control values remain unscaled for direct mapping.
-        
-        3. Input Preprocessing:
-           - Trigger inputs are preprocessed to map the raw range of [-1, 1] to [0, 1], ensuring usability for control purposes.
-        
-        Usage:
-        ------
-        1. Initialize the XboxInput class.
-        2. Call `get_action()` to retrieve the processed action array for the robot.
-        3. Use the action array in the robot control step function.
-    
+    DS4 / gamepad input backend for the FR3 MuJoCo teleoperation demo.
+
+    This class captures inputs from a PS4 DualShock 4 controller and maps them
+    to 7D teleoperation actions for the Franka simulation:
+
+        [x, y, z, roll, pitch, yaw, gripper]
+
+    Mapping used in this project:
+    - Left stick (axis 0 / 1): XY translation
+    - L1 / R1 (button 4 / 5): Z up / down
+    - L2 / R2 (axis 2 / 5): roll
+    - Right stick vertical (axis 4): pitch
+    - Right stick horizontal (axis 3): yaw
+    - Square / Circle (button 3 / 1): gripper open / close
+    - PS (button 10): reset / go home
+    - Options (button 9): exit teleoperation
     """
+
     def __init__(self):
-        # 初始化 Pygame 和 Joystick
         pygame.init()
         pygame.joystick.init()
-        self._exit_requested = False
 
-        # 检查是否有手柄连接
+        self._exit_requested = False
+        self._reset_requested = False
+
+        self._screen = pygame.display.set_mode((620, 260))
+        pygame.display.set_caption("FR3 DS4 Teleoperation")
+        self._font = pygame.font.Font(None, 24)
+        self._clock = pygame.time.Clock()
+
         if pygame.joystick.get_count() == 0:
-            raise RuntimeError("没有检测到手柄")
-        else:
-            self.joystick = pygame.joystick.Joystick(0)
-            self.joystick.init()
-            print(f"已连接手柄: {self.joystick.get_name()}")
+            raise RuntimeError("No controller detected. Please connect a controller and try again.")
+
+        self.joystick = pygame.joystick.Joystick(0)
+        self.joystick.init()
+
+        print(f"Controller connected: {self.joystick.get_name()}")
+        self._print_controls()
+        self._draw_controls()
+
+    def _print_controls(self):
+        print("DS4 controls:")
+        print("  Left stick: XY translation")
+        print("  L1 / R1: +Z / -Z")
+        print("  L2 / R2: roll +/-")
+        print("  Right stick vertical: pitch")
+        print("  Right stick horizontal: yaw")
+        print("  Square / Circle: open / close gripper")
+        print("  PS: reset environment / go home")
+        print("  Options: exit teleoperation")
+
+    def _draw_controls(self):
+        lines = [
+            "DS4 Teleoperation (DualShock 4)",
+            "Left stick: XY translation",
+            "L1 / R1: +Z / -Z",
+            "L2 / R2: roll +/-",
+            "Right stick vertical: pitch    Right stick horizontal: yaw",
+            "Square / Circle: open / close gripper",
+            "PS: reset / go home    Options: exit",
+        ]
+
+        self._screen.fill((28, 30, 34))
+        for i, line in enumerate(lines):
+            surface = self._font.render(line, True, (235, 235, 235))
+            self._screen.blit(surface, (18, 18 + i * 32))
+        pygame.display.flip()
 
     def poll_events(self):
-        """处理手柄事件。"""
+        """Process controller and window events."""
         for event in pygame.event.get():
-            if event.type == pygame.JOYBUTTONDOWN and event.button == 11:  # 停止按钮
+            if event.type == pygame.QUIT:
                 self._exit_requested = True
-                print("退出")
+
+            elif event.type == pygame.JOYBUTTONDOWN:
+                # Options -> exit
+                if event.button == 9:
+                    self._exit_requested = True
+                    print("Exit requested")
+
+                # PS -> reset / home
+                elif event.button == 10:
+                    self._reset_requested = True
+                    print("Reset requested -> Home")
+
+        self._clock.tick(60)
 
     def should_exit(self) -> bool:
-        """返回是否请求退出 teleoperation。"""
+        """Return whether teleoperation should exit."""
         return self._exit_requested
 
+    def consume_reset_requested(self) -> bool:
+        """Consume and clear reset request."""
+        requested = self._reset_requested
+        self._reset_requested = False
+        return requested
+
     def close(self):
-        """释放 pygame 资源。"""
+        """Release pygame resources."""
         if hasattr(self, "joystick"):
             self.joystick.quit()
         pygame.quit()
 
     def apply_dead_zone(self, value: float, threshold: float = 0.2) -> float:
         """
-        应用死区检测。
-        如果绝对值小于阈值，则返回 0，否则返回原始值。
-        Args:
-            value (float): 原始输入值
-            threshold (float): 死区阈值
-        Returns:
-            float: 过滤后的值
+        Apply dead-zone filtering to joystick input.
         """
         return value if abs(value) >= threshold else 0.0
 
     def preprocess_trigger(self, value: float) -> float:
         """
-        预处理扳机输入，将[-1, 1]映射到[0, 1]
-        Args:
-            value (float): 原始输入值（范围[-1, 1]）
-        Returns:
-            float: 处理后的值（范围[0, 1]）
+        Map trigger raw value from [-1, 1] to [0, 1].
         """
-        return (value + 1) / 2  # 映射公式
+        return (value + 1.0) / 2.0
 
     def get_action(self):
         """
-        获取手柄输入，映射为控制动作
+        Get controller input and map it to:
+            [x, y, z, roll, pitch, yaw, gripper]
+
         Returns:
-            np.ndarray: 包含 XYZ 移动和姿态控制的动作 [x, y, z, roll, pitch, yaw, gripper]
+            np.ndarray: 7D teleoperation action
         """
-        action = np.zeros(7)
+        action = np.zeros(7, dtype=np.float32)
 
-        # 左摇杆控制 XY 平面移动，加入死区检测
-        action[0] = self.apply_dead_zone(self.joystick.get_axis(0))  # 左摇杆X轴
-        action[1] = -1 * self.apply_dead_zone(self.joystick.get_axis(1))  # 左摇杆Y轴
+        # Left stick: XY
+        action[0] = self.apply_dead_zone(self.joystick.get_axis(0))          # left stick X
+        action[1] = -1.0 * self.apply_dead_zone(self.joystick.get_axis(1))   # left stick Y
 
-        # Y/A 按键控制 Z 轴移动
-        if self.joystick.get_button(4):  # 按下Y
-            action[2] = 1  # 向上
-        elif self.joystick.get_button(0):  # 按下A
-            action[2] = -1  # 向下
+        # L1 / R1: Z
+        if self.joystick.get_button(4):      # L1
+            action[2] = 1.0
+        elif self.joystick.get_button(5):    # R1
+            action[2] = -1.0
 
-        # 右摇杆和扳机控制姿态，加入死区检测
-        action[5] = -self.apply_dead_zone(self.joystick.get_axis(3)) * 0.5  # 修改：右摇杆X轴（俯仰）
-        action[4] = self.apply_dead_zone(self.joystick.get_axis(2))  # 右摇杆Y轴（偏航）
+        # L2 / R2: roll
+        l2 = self.preprocess_trigger(self.joystick.get_axis(2))
+        r2 = self.preprocess_trigger(self.joystick.get_axis(5))
+        l2 = 0.0 if l2 < 0.1 else l2
+        r2 = 0.0 if r2 < 0.1 else r2
+        action[3] = l2 - r2
 
-        # 左右扳机叠加控制偏航 (轴4 和 轴5)，加入死区检测
-        action[3] = self.preprocess_trigger(self.apply_dead_zone(self.joystick.get_axis(4))) - \
-                    self.preprocess_trigger(self.apply_dead_zone(self.joystick.get_axis(5)))
+        # Right stick: pitch / yaw
+        action[4] = -self.apply_dead_zone(self.joystick.get_axis(4))         # right stick vertical -> pitch
+        action[5] = -0.5 * self.apply_dead_zone(self.joystick.get_axis(3))   # right stick horizontal -> yaw
 
-        # 夹爪控制
-        if self.joystick.get_button(3):  # 按下X
-            action[6] = -0.1  # 张开
-        elif self.joystick.get_button(1):  # 按下B
-            action[6] = 0.1  # 闭合
+        # Square / Circle: gripper
+        if self.joystick.get_button(3):      # Square
+            action[6] = -0.1
+        elif self.joystick.get_button(1):    # Circle
+            action[6] = 0.1
 
-        # 分别缩放不同部分
-        action[:3] *= 0.01  # 缩放 XYZ 轴的移动
-        action[3:6] *= 0.05  # 缩放姿态控制
-        # action[6] 保持原始值，无需缩放
+        # Scale translation and rotation
+        action[:3] *= 0.01
+        action[3:6] *= 0.05
+        # action[6] keeps original incremental gripper command
 
         return action

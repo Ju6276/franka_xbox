@@ -11,9 +11,9 @@ from franka_sim.mujoco_gym_env import GymRenderingSpec, MujocoGymEnv
 
 _HERE = Path(__file__).parent
 _XML_PATH = _HERE / "xmls" / "franka_only.xml"
-_PANDA_HOME = np.asarray((0, -0.405, 0, -2.86, 0, 2.43, np.pi / 4))
-_CARTESIAN_BOUNDS = np.asarray([[0.2, -0.3, 0.05], [0.7, 0.3, 0.7]])
-_TCP_POS_SENSOR = "panda/pinch_pos"
+_PANDA_HOME = np.asarray((0, -0.405, 0, -2.86, 0, 2.43, np.pi / 4)) # 机器人初始关节位置
+_CARTESIAN_BOUNDS = np.asarray([[0.2, -0.3, 0.05], [0.7, 0.3, 0.7]]) # TCP位置的边界 [min_x, min_y, min_z], [max_x, max_y, max_z]
+_TCP_POS_SENSOR = "panda/pinch_pos"  # MuJoCo传感器名称，用于获取TCP位置
 _TCP_QUAT_SENSOR = "panda/pinch_quat"
 _TCP_VEL_SENSOR = "panda/pinch_vel"
 
@@ -30,13 +30,13 @@ class FrankaTeleopGymEnv(MujocoGymEnv):
         time_limit: float = float("inf"),
         render_spec: GymRenderingSpec = GymRenderingSpec(),
         render_mode: Literal["rgb_array", "human"] = "rgb_array",
-        image_obs: bool = False,
+        image_obs: bool = True,
     ):
         if len(action_scale) < 3:
             action_scale = np.asarray([action_scale[0], action_scale[1], 0.1])
         self._action_scale = action_scale
 
-        super().__init__(
+        super().__init__(                   #采用MujocoGymEnv的构造函数，传入xml路径、随机种子、控制时间步长、物理时间步长、时间限制、渲染规格等参数
             xml_path=_XML_PATH,
             seed=seed,
             control_dt=control_dt,
@@ -48,7 +48,7 @@ class FrankaTeleopGymEnv(MujocoGymEnv):
         self.metadata = {
             "render_modes": ["human", "rgb_array"],
             "render_fps": int(np.round(1.0 / self.control_dt)),
-        }
+        }                                                                      #设置环境的元数据，包括支持的渲染模式和渲染帧率（根据控制时间步长计算）
         self.render_mode = render_mode
         self.image_obs = image_obs
 
@@ -82,7 +82,13 @@ class FrankaTeleopGymEnv(MujocoGymEnv):
                         high=255,
                         shape=(render_spec.height, render_spec.width, 3),
                         dtype=np.uint8,
-                    )
+                    ),
+                    "wrist": gym.spaces.Box(
+                        low=0,
+                        high=255,
+                        shape=(render_spec.height, render_spec.width, 3),
+                        dtype=np.uint8,
+                    ),
                 }
             )
         self.observation_space = gym.spaces.Dict(observation_spaces)
@@ -93,10 +99,11 @@ class FrankaTeleopGymEnv(MujocoGymEnv):
             dtype=np.float32,
         )
 
-        from gymnasium.envs.mujoco.mujoco_rendering import MujocoRenderer
-
-        self._viewer = MujocoRenderer(self.model, self.data)
-        self._viewer.render(self.render_mode)
+        self._rgb_renderer = mujoco.Renderer(
+            self._model,
+            height=render_spec.height,
+            width=render_spec.width,
+        )                                     
 
     def reset(self, seed=None, **kwargs) -> Tuple[Dict[str, np.ndarray], Dict[str, Any]]:
         mujoco.mj_resetData(self._model, self._data)
@@ -114,9 +121,9 @@ class FrankaTeleopGymEnv(MujocoGymEnv):
     def step(self, action: np.ndarray) -> Tuple[Dict[str, np.ndarray], float, bool, bool, Dict[str, Any]]:
         x, y, z, roll, pitch, yaw, grasp = action
 
-        pos = self._data.mocap_pos[0].copy()
-        dpos = np.asarray([x, y, z]) * self._action_scale[0]
-        self._data.mocap_pos[0] = np.clip(pos + dpos, *_CARTESIAN_BOUNDS)
+        pos = self._data.mocap_pos[0].copy()                                                    #获取当前TCP位置的副本
+        dpos = np.asarray([x, y, z]) * self._action_scale[0]                                     #根据动作的前3个元素（位置增量）和位置缩放因子计算TCP位置的增量
+        self._data.mocap_pos[0] = np.clip(pos + dpos, *_CARTESIAN_BOUNDS)                       #将新的TCP位置限制在预定义的笛卡尔空间边界内，并更新mocap_pos[0]以反映新的TCP位置
 
         if grasp <= -1.0:
             self._open_gripper()
@@ -132,7 +139,7 @@ class FrankaTeleopGymEnv(MujocoGymEnv):
         euler_increment = np.asarray([roll, pitch, yaw]) * self._action_scale[2]
         self._data.mocap_quat[0] = self.quat_multiply(current_quat, self.euler_to_quat(euler_increment))
 
-        for _ in range(self._n_substeps):
+        for _ in range(self._n_substeps):                                                      #给定目标 TCP 位姿，opspace(...) 根据当前状态和目标计算关节力矩 tau，把 tau 写进机械臂 7 个 actuator，MuJoCo 做一步物理仿真
             tau = opspace(
                 model=self._model,
                 data=self._data,
@@ -148,12 +155,31 @@ class FrankaTeleopGymEnv(MujocoGymEnv):
 
         obs = self._compute_observation()
         terminated = self.time_limit_exceeded()
-        return obs, 0.0, terminated, False, self._command_info()
+        return obs, 0.0, terminated, False, self._command_info()             #返回新的观察、奖励（这里始终为0.0，因为是遥操作不是强化学习）、是否终止（根据时间限制）、是否截断（这里始终为False）以及额外信息（当前命令信息）
+
+    def render_camera(self, camera_name: str) -> np.ndarray:
+        camera_id = mujoco.mj_name2id(
+            self._model,
+            mujoco.mjtObj.mjOBJ_CAMERA,
+            camera_name,
+        )
+        if camera_id == -1:
+            raise ValueError(f"Camera '{camera_name}' not found in MuJoCo model.")
+
+        self._rgb_renderer.update_scene(self._data, camera=camera_id)
+        img = self._rgb_renderer.render()
+        return np.ascontiguousarray(img, dtype=np.uint8)
+    
+
+    def grab_images(self) -> Dict[str, np.ndarray]:
+        images = {
+            "front": self.render_camera("front"),
+            "wrist": self.render_camera("handcam_rgb"),
+        }
+        return images
 
     def render(self):
-        if self.render_mode == "human":
-            return self._viewer.render(self.render_mode)
-        return self._viewer.render(render_mode="rgb_array", camera_id=0)
+        return self.render_camera("front")
 
     def get_joint_command(self) -> np.ndarray:
         return self._data.qpos[self._panda_qpos_ids].astype(np.float32).copy()
@@ -161,7 +187,7 @@ class FrankaTeleopGymEnv(MujocoGymEnv):
     def get_gripper_command(self) -> float:
         return float(self._data.ctrl[self._gripper_ctrl_id] / 255)
 
-    def _command_info(self) -> Dict[str, Any]:
+    def _command_info(self) -> Dict[str, Any]:  
         return {
             "joint_command": self.get_joint_command(),
             "gripper_command": self.get_gripper_command(),
@@ -181,20 +207,21 @@ class FrankaTeleopGymEnv(MujocoGymEnv):
         self._set_gripper_command(open_gripper=open_gripper)
         mujoco.mj_forward(self._model, self._data)
 
-    def _compute_observation(self) -> Dict[str, Any]:
+    def get_state_dict(self) -> Dict[str, np.ndarray]:
+        return {
+            "panda/tcp_pos": self._data.sensor(_TCP_POS_SENSOR).data.astype(np.float32),
+            "panda/tcp_vel": self._data.sensor(_TCP_VEL_SENSOR).data.astype(np.float32),
+            "panda/joint_pos": self._data.qpos[self._panda_qpos_ids].astype(np.float32),
+            "panda/joint_vel": self._data.qvel[self._panda_qvel_ids].astype(np.float32),
+            "panda/gripper_pos": np.array([self.get_gripper_command()], dtype=np.float32),
+        }
+
+    def _compute_observation(self) -> Dict[str, Any]:       #从 MuJoCo 模型中提取当前状态信息，构建一个包含 TCP 位置、TCP 速度、关节位置、关节速度和夹爪位置的观察字典，如果启用了图像观察，还会包含前视和手腕摄像头的图像数据
         obs = {
-            "state": {
-                "panda/tcp_pos": self._data.sensor(_TCP_POS_SENSOR).data.astype(np.float32),
-                "panda/tcp_vel": self._data.sensor(_TCP_VEL_SENSOR).data.astype(np.float32),
-                "panda/joint_pos": self._data.qpos[self._panda_qpos_ids].astype(np.float32),
-                "panda/joint_vel": self._data.qvel[self._panda_qvel_ids].astype(np.float32),
-                "panda/gripper_pos": np.array([self.get_gripper_command()], dtype=np.float32),
-            }
+                "state": self.get_state_dict()
         }
         if self.image_obs:
-            obs["images"] = {"front": self.render()}
-        if self.render_mode == "human":
-            self._viewer.render(self.render_mode)
+            obs["images"] = self.grab_images()
         return obs
 
     def euler_to_quat(self, euler):
