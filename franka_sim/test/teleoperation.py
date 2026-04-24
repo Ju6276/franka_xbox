@@ -15,7 +15,7 @@ def parse_args():
         default="task",
         help="Run a simulated task or a Franka-only controller scene.",
     )
-    parser.add_argument("--task", choices=("gear",), default="gear", help="Task scene used when --mode task.")
+    parser.add_argument("--task", choices=("gear", "pickplace"), default="gear", help="Task scene used when --mode task.")
     parser.add_argument(
         "--input",
         "--input-device",
@@ -27,7 +27,7 @@ def parse_args():
     parser.add_argument("--use-keyboard", action="store_true", help="Shortcut for --input keyboard.")
     parser.add_argument(
         "--env",
-        choices=("gear", "franka"),
+        choices=("gear", "pickplace", "franka"),
         default=None,
         help="Legacy shortcut: gear maps to --mode task, franka maps to --mode controller.",
     )
@@ -58,6 +58,9 @@ def resolve_args(args):
     elif args.env == "gear":
         args.mode = "task"
         args.task = "gear"
+    elif args.env == "pickplace":
+        args.mode = "task"
+        args.task = "pickplace"
 
     return args
 
@@ -85,6 +88,9 @@ def make_env(args):
 
     if args.task == "gear":
         return envs.PandaAssembleGearGymEnv(action_scale=(0.1, 1))
+
+    if args.task == "pickplace":
+        return envs.PandaPickPlaceGymEnv(action_scale=(0.1, 1))
 
     raise ValueError(f"Unsupported task: {args.task}")
 
@@ -211,12 +217,17 @@ def update_viewer_overlay(viewer, obs, action=None):
             print("set_texts failed:", e)
 
 
-def build_step_record(episode_idx, frame_idx, action, obs, info):
-    return {
+def build_step_record(episode_idx, frame_idx, action, obs, info, reward, terminated, truncated):
+    step_record = {
         "episode_index": episode_idx,
         "frame_id": frame_idx,
         "timestamp": time.time(),
         "action": action.tolist(),
+        "success": bool(info.get("success", False)),
+        "reward": float(reward),
+        "terminated": bool(terminated),
+        "truncated": bool(truncated),
+        "done": bool(terminated or truncated),
         "joint_command": info["joint_command"].tolist() if "joint_command" in info else None,
         "gripper_command": float(info["gripper_command"]) if "gripper_command" in info else None,
         "tcp_pos": info["tcp_pos"].tolist() if "tcp_pos" in info else None,
@@ -224,6 +235,13 @@ def build_step_record(episode_idx, frame_idx, action, obs, info):
         "joint_vel": obs["state"]["panda/joint_vel"].tolist(),
         "gripper_pos": obs["state"]["panda/gripper_pos"].tolist(),
     }
+
+    if "block_pos" in obs["state"]:
+        step_record["block_pos"] = obs["state"]["block_pos"].tolist()
+    if "goal_pos" in obs["state"]:
+        step_record["goal_pos"] = obs["state"]["goal_pos"].tolist()
+
+    return step_record
 
 def save_step_images(front_dir, wrist_dir, frame_idx, obs, step_record):
     if "images" not in obs:
@@ -316,15 +334,28 @@ def main():
                 action = controller.get_action()
                 step_start = time.time()
 
-                obs, _, _, _, info = env.step(action)
+                obs, reward, terminated, truncated, info = env.step(action)
                 maybe_print_step(args, action, info)
+
+                if info.get("success", False):
+                    print("Task success detected. Auto-resetting environment.")
+                    reset_requested = True
 
                 if args.show_camera_view:
                     live_obs = {"images": env.grab_images()}
                     update_viewer_overlay(viewer, live_obs, action=action)
 
                 if args.record:
-                    step_record = build_step_record(episode_idx, frame_idx, action, obs, info)
+                    step_record = build_step_record(
+                        episode_idx=episode_idx,
+                        frame_idx=frame_idx,
+                        action=action,
+                        obs=obs,
+                        info=info,
+                        reward=reward,
+                        terminated=terminated,
+                        truncated=truncated,
+                    )
 
                     if args.save_images:
                         save_step_images(front_dir, wrist_dir, frame_idx, obs, step_record)
