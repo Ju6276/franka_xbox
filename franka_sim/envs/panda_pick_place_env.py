@@ -11,9 +11,9 @@ from franka_sim.mujoco_gym_env import GymRenderingSpec, MujocoGymEnv
 
 _HERE = Path(__file__).parent
 _XML_PATH = _HERE / "xmls" / "pick_place.xml"
-_PANDA_HOME = np.asarray((0, -0.405, 0, -2.86, 0, 2.43, np.pi / 4))
-_CARTESIAN_BOUNDS = np.asarray([[0.2, -0.3, 0.05], [0.7, 0.3, 0.7]])
-_BLOCK_SAMPLING_BOUNDS = np.asarray([[0.38, -0.12], [0.52, 0.12]])
+_PANDA_HOME = np.asarray((0, 0.195, 0, -2.43, 0, 2.62, np.pi / 4))
+_CARTESIAN_BOUNDS = np.asarray([[0.2, -0.3, 0.0], [0.6, 0.3, 0.5]])
+_BLOCK_SAMPLING_BOUNDS = np.asarray([[0.3, -0.15], [0.5, 0.15]])
 _GOAL_XY = np.asarray([0.35, 0.18], dtype=np.float32)
 _GOAL_RADIUS = 0.05
 _TABLE_Z_MARGIN = 0.02
@@ -29,12 +29,13 @@ class PandaPickPlaceGymEnv(MujocoGymEnv):
         self,
         action_scale: np.ndarray = np.asarray([0.1, 1, 0.1]),
         seed: int = 0,
-        control_dt: float = 0.02,
+        control_dt: float = 0.1,
         physics_dt: float = 0.002,
-        time_limit: float = 20.0,
+        time_limit: float = 30.0,
         render_spec: GymRenderingSpec = GymRenderingSpec(),
         render_mode: Literal["rgb_array", "human"] = "rgb_array",
         image_obs: bool = True,
+        random_block_position: bool = False,
     ):
         if len(action_scale) < 3:
             action_scale = np.asarray([action_scale[0], action_scale[1], 0.1])
@@ -66,8 +67,10 @@ class PandaPickPlaceGymEnv(MujocoGymEnv):
         self._finger_qvel_ids = self._model.jnt_dofadr[self._finger_joint_ids]
         self._finger_joint_ranges = self._model.jnt_range[self._finger_joint_ids]
         self._pinch_site_id = self._model.site("pinch").id
-        self._block_joint_id = self._model.joint("block_joint").id
+        self._block_joint_id = self._model.joint("block").id
         self._block_qpos_adr = self._model.jnt_qposadr[self._block_joint_id]
+        self._block_z = self._model.geom("block").size[2]
+        self._random_block_position = random_block_position
 
         observation_spaces = {
             "state": gym.spaces.Dict(
@@ -114,7 +117,7 @@ class PandaPickPlaceGymEnv(MujocoGymEnv):
             width=render_spec.width,
         )
 
-        self._goal_pos = np.asarray([_GOAL_XY[0], _GOAL_XY[1], 0.025], dtype=np.float32)
+        self._goal_pos = np.asarray([_GOAL_XY[0], _GOAL_XY[1], 0.001], dtype=np.float32)
         self._z_init = 0.04
 
     def reset(self, seed=None, **kwargs) -> Tuple[Dict[str, np.ndarray], Dict[str, Any]]:
@@ -123,12 +126,16 @@ class PandaPickPlaceGymEnv(MujocoGymEnv):
         self._data.qpos[self._panda_qpos_ids] = _PANDA_HOME
         self._reset_gripper(open_gripper=True)
 
-        block_xy = np.random.uniform(*_BLOCK_SAMPLING_BOUNDS)
-        block_qpos = self._data.joint("block_joint").qpos.copy()
-        block_qpos[:3] = [block_xy[0], block_xy[1], 0.04]
+        if self._random_block_position:
+            block_xy = np.random.uniform(*_BLOCK_SAMPLING_BOUNDS)
+        else:
+            block_xy = np.asarray([0.5, 0.0])
+
+        block_qpos = self._data.joint("block").qpos.copy()
+        block_qpos[:3] = [block_xy[0], block_xy[1], self._block_z]
         block_qpos[3:] = [1.0, 0.0, 0.0, 0.0]
-        self._data.joint("block_joint").qpos = block_qpos
-        self._data.joint("block_joint").qvel = np.zeros(6, dtype=np.float64)
+        self._data.joint("block").qpos = block_qpos
+        self._data.joint("block").qvel = np.zeros(6, dtype=np.float64)
 
         mujoco.mj_forward(self._model, self._data)
 
@@ -136,11 +143,13 @@ class PandaPickPlaceGymEnv(MujocoGymEnv):
         self._data.mocap_quat[0] = self._data.sensor(_TCP_QUAT_SENSOR).data
         mujoco.mj_forward(self._model, self._data)
 
-        self._z_init = float(self._data.site("block_site").xpos[2])
+        self._z_init = float(self._data.sensor("block_pos").data[2])
 
         obs = self._compute_observation()
         info = self._command_info()
         info["success"] = False
+        info["succeed"] = False
+        info["goal_xy"] = _GOAL_XY.copy()
         return obs, info
 
     def step(self, action: np.ndarray) -> Tuple[Dict[str, np.ndarray], float, bool, bool, Dict[str, Any]]:
@@ -181,14 +190,22 @@ class PandaPickPlaceGymEnv(MujocoGymEnv):
         obs = self._compute_observation()
         success = self._is_success()
         reward = 1.0 if success else 0.0
-        terminated = success or self.time_limit_exceeded()
+        block_pos = self._data.sensor("block_pos").data
+        exceeded_bounds = np.any(block_pos[:2] < (_BLOCK_SAMPLING_BOUNDS[0] - 0.05)) or np.any(
+            block_pos[:2] > (_BLOCK_SAMPLING_BOUNDS[1] + 0.10)
+        )
+
+        terminated = success or exceeded_bounds or self.time_limit_exceeded()
         info = self._command_info()
         info["success"] = success
+        info["succeed"] = success
+        info["goal_xy"] = _GOAL_XY.copy()
+        info["block_pos"] = block_pos.copy()
 
         return obs, reward, terminated, False, info
 
     def _is_success(self) -> bool:
-        block_pos = self._data.site("block_site").xpos
+        block_pos = self._data.sensor("block_pos").data
         xy_ok = np.linalg.norm(block_pos[:2] - _GOAL_XY) < _GOAL_RADIUS
         z_ok = abs(block_pos[2] - self._z_init) < _TABLE_Z_MARGIN
         return bool(xy_ok and z_ok)
@@ -248,7 +265,7 @@ class PandaPickPlaceGymEnv(MujocoGymEnv):
             "panda/joint_pos": self._data.qpos[self._panda_qpos_ids].astype(np.float32),
             "panda/joint_vel": self._data.qvel[self._panda_qvel_ids].astype(np.float32),
             "panda/gripper_pos": np.array([self.get_gripper_command()], dtype=np.float32),
-            "block_pos": self._data.site("block_site").xpos.astype(np.float32),
+            "block_pos": self._data.sensor("block_pos").data.astype(np.float32),
             "goal_pos": self._goal_pos.astype(np.float32),
         }
 

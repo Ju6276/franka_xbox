@@ -23,7 +23,7 @@ class FrankaTeleopGymEnv(MujocoGymEnv):
 
     def __init__(
         self,
-        action_scale: np.ndarray = np.asarray([0.1, 1, 0.1]),
+        action_scale: np.ndarray = np.asarray([0.01, 1, 0.01]),
         seed: int = 0,
         control_dt: float = 0.02,
         physics_dt: float = 0.002,

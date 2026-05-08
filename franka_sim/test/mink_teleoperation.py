@@ -48,6 +48,16 @@ def parse_args():
         default=10,
         help="Print joint commands every N steps. Use 0 to disable printing.",
     )
+    parser.add_argument("--backend", choices=("print", "real"), default="print",
+                    help="Print commands only, or send them to the real robot.")
+    parser.add_argument("--robot-ip", type=str, default=None,
+                        help="Robot IP for Franka bridge, required if --backend real.")
+    parser.add_argument("--home-duration", type=float, default=4.0,
+                        help="Seconds used to move the real robot to PANDA_HOME at startup/reset.")
+    parser.add_argument("--joint-step-max", type=float, default=0.002,
+                        help="Maximum per-cycle joint step sent by the RT bridge in rad.")
+    parser.add_argument("--gripper-speed", type=float, default=0.04,
+                        help="Gripper move speed in m/s.")
     return parser.parse_args()
 
 
@@ -171,6 +181,26 @@ def run(args):
     finger_qvel_ids = model.jnt_dofadr[finger_joint_ids]
     finger_ranges = model.jnt_range[finger_joint_ids]
 
+    bridge = None
+    if args.backend == "real":
+        if not args.robot_ip:
+            raise ValueError("--robot-ip is required when --backend real")
+
+        from franka_bridge import FrankaBridge
+
+        bridge = FrankaBridge(
+            robot_ip=args.robot_ip,
+            home_q=panda_home,
+            command_rate_hz=args.rate,
+            max_joint_step=args.joint_step_max,
+            gripper_speed=args.gripper_speed,
+            limit_rate=True,
+            cutoff_frequency=100.0,
+        )
+
+        print("Moving real robot to PANDA_HOME ...")
+        bridge.move_to_home(duration=args.home_duration)
+
     q = data.qpos.copy()
     q[arm_qpos_ids] = panda_home
     q[finger_qpos_ids] = finger_ranges[:, 1]
@@ -226,6 +256,10 @@ def run(args):
             if hasattr(controller, "consume_reset_requested") and controller.consume_reset_requested():
                 reset_requested = True
             if reset_requested:
+                if bridge is not None:
+                    print("Reset requested: moving real robot back to PANDA_HOME ...")
+                    bridge.move_to_home(duration=args.home_duration)
+
                 q = data.qpos.copy()
                 q[arm_qpos_ids] = panda_home
                 q[finger_qpos_ids] = finger_ranges[:, 1]
@@ -264,6 +298,12 @@ def run(args):
             mujoco.mj_forward(model, data)
 
             joint_command = data.qpos[arm_qpos_ids].astype(np.float64).copy()
+            gripper_width = gripper_width_from_command(gripper_command)
+
+            if bridge is not None:
+                bridge.update_joint_target(joint_command)
+                bridge.update_gripper_target(gripper_width)
+
             if args.print_every > 0 and step_count % args.print_every == 0:
                 print_command(step_count, joint_command, gripper_command)
 
@@ -284,6 +324,8 @@ def run(args):
             with mujoco.viewer.launch_passive(model, data, key_callback=key_callback) as viewer:
                 teleop_loop(viewer=viewer)
     finally:
+        if bridge is not None:
+            bridge.close()
         controller.close()
 
 

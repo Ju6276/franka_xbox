@@ -157,8 +157,8 @@ class XboxInput:
             action[6] = 0.1
 
         # Scale translation and rotation
-        action[:3] *= 0.01
-        action[3:6] *= 0.05
+        action[:3] *= 0.001
+        action[3:6] *= 0.005
         # action[6] keeps original incremental gripper command
 
         return action
